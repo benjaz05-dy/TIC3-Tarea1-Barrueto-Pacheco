@@ -18,13 +18,11 @@
 /***************** CONFIGURACIÓN DE LA PLACA *********************/
 /*****************************************************************/
 
-/* Lo único que hay que cambiar para otra placa. */
+/* Pistas internas de la placa que conectan el ESP32-S3 con el BMI270 integrado. */
 #define I2C_MASTER_SCL_IO       GPIO_NUM_2      // reloj
 #define I2C_MASTER_SDA_IO       GPIO_NUM_42     // datos
 #define I2C_MASTER_FREQ_HZ      100000
 
-/* Cada cuánto se imprime una muestra. */
-#define SAMPLE_PERIOD_MS        200
 
 
 /*****************************************************************/
