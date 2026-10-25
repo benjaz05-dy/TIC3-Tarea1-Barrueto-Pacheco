@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -18,7 +19,7 @@
 #define WIFI_SSID "iPhone de Eustas"
 #define WIFI_PASS "Pachec1652"
 
-// IP DE LA RASPBERRY (CAMBIAR)
+// IP DE LA RASPBERRY
 #define SERVER_IP "172.20.10.10"
 #define SERVER_PORT 5000
 
@@ -27,6 +28,9 @@
 static const char *TAG_TCP = "TCP_BMI270";
 static EventGroupHandle_t wifi_eventos;
 static int socket_tcp = -1;
+static int socket_udp = -1;
+static struct sockaddr_in destino_udp = {0};
+static bool modo_udp_activo = false;
 
 // Gestion de eventos WiFi
 static void evento_wifi(
@@ -120,15 +124,19 @@ void wifi_iniciar(void) {
     ESP_LOGI(TAG_TCP, "WiFi listo");
 }
 
-// Cerrar socket anterior
+// Cerrar sockets anteriores
 static void tcp_cerrar(void) {
     if (socket_tcp >= 0) {
         close(socket_tcp);
         socket_tcp = -1;
     }
+    if (socket_udp >= 0) {
+        close(socket_udp);
+        socket_udp = -1;
+    }
 }
 
-// Establecer conexion TCP
+// Establecer conexion TCP y preparar socket UDP
 bool tcp_conectar(void) {
 
     tcp_cerrar();
@@ -180,11 +188,43 @@ bool tcp_conectar(void) {
         return false;
     }
 
-    ESP_LOGI(TAG_TCP, "Conexion TCP establecida");
+    // Crear socket UDP para cuando se elija protocolo UDP
+    socket_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (socket_udp >= 0) {
+        destino_udp = destino;
+    }
+
+    ESP_LOGI(TAG_TCP, "Conexion TCP establecida (UDP preparado)");
     return true;
 }
 
-// Enviar datos de una muestra real
+// Verificar sin bloquear si la Raspberry envio STOP
+bool tcp_verificar_stop(void) {
+    if (socket_tcp < 0) {
+        return true;
+    }
+
+    char buf[32];
+    ssize_t n = recv(socket_tcp, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+
+    if (n > 0) {
+        buf[n] = '\0';
+        if (strstr(buf, "STOP") != NULL) {
+            ESP_LOGI(TAG_TCP, "Comando STOP recibido");
+            return true;
+        }
+    } else if (n == 0) {
+        return true;
+    } else {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Enviar datos de una muestra real (TCP o UDP)
 bool tcp_enviar_imu(
     uint32_t secuencia,
     uint32_t tiempo_ms,
@@ -205,6 +245,7 @@ bool tcp_enviar_imu(
         paquete,
         sizeof(paquete),
         "{\"type\":\"imu\","
+        "\"proto\":\"%s\","
         "\"seq\":%lu,"
         "\"t_ms\":%lu,"
         "\"acc_x_ms2\":%.5f,"
@@ -216,6 +257,7 @@ bool tcp_enviar_imu(
         "\"odr_hz\":%d,"
         "\"rango_g\":%d,"
         "\"periodo_ms\":%d}\n",
+        modo_udp_activo ? "UDP" : "TCP",
         (unsigned long)secuencia,
         (unsigned long)tiempo_ms,
         ax, ay, az,
@@ -226,6 +268,31 @@ bool tcp_enviar_imu(
     if (longitud < 0 || longitud >= (int)sizeof(paquete)) {
         ESP_LOGE(TAG_TCP, "Error formando JSON");
         return false;
+    }
+
+    if (modo_udp_activo) {
+        if (socket_udp < 0) {
+            ESP_LOGW(TAG_TCP, "Socket UDP no disponible");
+            return false;
+        }
+
+        int n = sendto(
+            socket_udp,
+            paquete,
+            longitud,
+            0,
+            (struct sockaddr *)&destino_udp,
+            sizeof(destino_udp)
+        );
+
+        if (n < 0) {
+            ESP_LOGW(TAG_TCP, "Fallo de envio UDP");
+            return false;
+        }
+
+        ESP_LOGI(TAG_TCP, "Muestra %lu enviada (UDP)",
+                 (unsigned long)secuencia);
+        return true;
     }
 
     // TCP puede enviar menos bytes de los pedidos
@@ -248,7 +315,7 @@ bool tcp_enviar_imu(
         enviados += n;
     }
 
-    ESP_LOGI(TAG_TCP, "Muestra %lu enviada",
+    ESP_LOGI(TAG_TCP, "Muestra %lu enviada (TCP)",
              (unsigned long)secuencia);
 
     return true;
@@ -314,27 +381,37 @@ bool tcp_recibir_config(tcp_config_t *config) {
             }
         }
         mensaje[posicion] = '\0';
+
+        if (strcmp(mensaje, "STOP") == 0 || posicion == 0) {
+            continue;
+        }
+
         ESP_LOGI(TAG_TCP, "Comando recibido: %s", mensaje);
 
         int frecuencia = 0;
         int rango = 0;
-        int cantidad = 0;
+        int cantidad = -1;
         char modo[16] = {0};
+        char protocolo[16] = "TCP";
 
-        int campos = sscanf(mensaje, "START %d %d %d %15s",
-                            &frecuencia, &rango, &cantidad, modo);
+        int campos = sscanf(mensaje, "START %d %d %d %15s %15s",
+                            &frecuencia, &rango, &cantidad, modo, protocolo);
 
         bool frecuencia_valida = frecuencia == 25 || frecuencia == 50 || frecuencia == 100;
         bool rango_valido = rango == 2 || rango == 4 || rango == 8 || rango == 16;
         bool modo_valido = strcmp(modo, "SECUENCIAL") == 0 ||
                            strcmp(modo, "PARALELO") == 0;
+        bool proto_valido = strcmp(protocolo, "TCP") == 0 ||
+                            strcmp(protocolo, "UDP") == 0;
 
-        if (!demasiado_largo && campos == 4 && frecuencia_valida &&
-            rango_valido && cantidad >= 1 && cantidad <= 10000 && modo_valido) {
+        if (!demasiado_largo && (campos == 4 || campos == 5) && frecuencia_valida &&
+            rango_valido && cantidad >= 0 && cantidad <= 1000000 && modo_valido && proto_valido) {
             config->frecuencia_hz = frecuencia;
             config->rango_g = rango;
             config->cantidad = cantidad;
             config->paralelo = strcmp(modo, "PARALELO") == 0;
+            config->usar_udp = strcmp(protocolo, "UDP") == 0;
+            modo_udp_activo = config->usar_udp;
             return true;
         }
 
