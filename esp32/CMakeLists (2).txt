@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "main copy.c"
+        "tcp_cliente.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES
+        esp_driver_i2c
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        lwip
+)
