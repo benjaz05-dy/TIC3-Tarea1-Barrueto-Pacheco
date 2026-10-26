@@ -63,4 +63,7 @@ lo de paralelo o secuencial, las muestras, TCP o UDP, la lectura I2C, sevidor so
 13\. Revisa si la explicación de los resultados TCP y UDP coincide con los datos de nuestras pruebas.
 
 
+14\. Oye con lo que tengo en la imagen puedes hacer un readme para el inicio
+
+
 
